@@ -400,48 +400,53 @@ static int hwc_query(struct hwc_composer_device_1* dev,
 
 }
 
-
 static int hwc_set_primary(hwc_context_t *ctx, hwc_display_contents_1_t* list) {
-    ATRACE_CALL();
     int ret = 0;
-    const int dpy = HWC_DISPLAY_PRIMARY;
 
-    if (LIKELY(list) && ctx->dpyAttr[dpy].isActive) {
+    if (UNLIKELY(!list || (list->numHwLayers <= 0)))
+        return -EINVAL;
+
+    if(ctx->dpyAttr[HWC_DISPLAY_PRIMARY].isActive) {
         uint32_t last = list->numHwLayers - 1;
         hwc_layer_1_t *fbLayer = &list->hwLayers[last];
-        int fd = -1; //FenceFD from the Copybit(valid in async mode)
-        bool copybitDone = false;
-        if(ctx->mCopyBit[dpy])
-            copybitDone = ctx->mCopyBit[dpy]->draw(ctx, list, dpy, &fd);
-        if(list->numHwLayers > 1)
-            hwc_sync(ctx, list, dpy, fd);
 
-        if (!ctx->mMDPComp[dpy]->draw(ctx, list)) {
-            ALOGE("%s: MDPComp draw failed", __FUNCTION__);
-            ret = -1;
+        if (list->numHwLayers > 1)
+        {
+            /* acquire sync via hwc_sync, not fb device */
+            ctx->mFbDev->setSwapInterval(ctx->mFbDev, 0);
+
+            hwc_sync(ctx, list, HWC_DISPLAY_PRIMARY);
+
+            if (!VideoOverlay::draw(ctx, list, HWC_DISPLAY_PRIMARY)) {
+                ALOGE("%s: VideoOverlay::draw fail!", __FUNCTION__);
+                ret = -1;
+            }
+            if (MDPComp::draw(ctx, list)) {
+                ALOGE("%s: MDPComp::draw fail!", __FUNCTION__);
+                 ret = -1;
+            }
         }
 
         //TODO We dont check for SKIP flag on this layer because we need PAN
         //always. Last layer is always FB
-        private_handle_t *hnd = (private_handle_t *)fbLayer->handle;
-        if(copybitDone) {
-            hnd = ctx->mCopyBit[dpy]->getCurrentRenderBuffer();
-        }
+        if(list->hwLayers[last].compositionType == HWC_FRAMEBUFFER_TARGET)
+        {
+            //if there is just one fb layer, post should wait for
+            //fb vsync because the driver isn't returning usable fences.
+            if (list->numHwLayers == 1)
+            {
+                /* acquire sync via fb device */
+                ctx->mFbDev->setSwapInterval(ctx->mFbDev, 1);
+                list->retireFenceFd = -1;
+                fbLayer->releaseFenceFd = -1;
+            }
 
-        if(hnd) {
-            if (!ctx->mFBUpdate[dpy]->draw(ctx, hnd)) {
-                ALOGE("%s: FBUpdate draw failed", __FUNCTION__);
-                ret = -1;
+            if (ctx->mFbDev->post(ctx->mFbDev, fbLayer->handle)) {
+                ALOGE("%s: ctx->mFbDev->post fail!", __FUNCTION__);
+                return -1;
             }
         }
-
-        if (display_commit(ctx, dpy) < 0) {
-            ALOGE("%s: display commit fail!", __FUNCTION__);
-            ret = -1;
-        }
     }
-
-    closeAcquireFds(list, dpy);
     return ret;
 }
 
@@ -612,6 +617,7 @@ int hwc_getDisplayConfigs(struct hwc_composer_device_1* dev, int disp,
     return ret;
 }
 
+
 int hwc_getDisplayAttributes(struct hwc_composer_device_1* dev, int disp,
         uint32_t config, const uint32_t* attributes, int32_t* values) {
 
@@ -621,33 +627,17 @@ int hwc_getDisplayAttributes(struct hwc_composer_device_1* dev, int disp,
         return -1;
     }
 
-    //From HWComposer
-    static const uint32_t DISPLAY_ATTRIBUTES[] = {
-        HWC_DISPLAY_VSYNC_PERIOD,
-        HWC_DISPLAY_WIDTH,
-        HWC_DISPLAY_HEIGHT,
-        HWC_DISPLAY_DPI_X,
-        HWC_DISPLAY_DPI_Y,
-        HWC_DISPLAY_NO_ATTRIBUTE,
-    };
-
-    const int NUM_DISPLAY_ATTRIBUTES = (sizeof(DISPLAY_ATTRIBUTES) /
-            sizeof(DISPLAY_ATTRIBUTES)[0]);
-
-    for (size_t i = 0; i < NUM_DISPLAY_ATTRIBUTES - 1; i++) {
+    int i = 0;
+    while(attributes[i] != HWC_DISPLAY_NO_ATTRIBUTE) {
         switch (attributes[i]) {
         case HWC_DISPLAY_VSYNC_PERIOD:
             values[i] = ctx->dpyAttr[disp].vsync_period;
             break;
         case HWC_DISPLAY_WIDTH:
             values[i] = ctx->dpyAttr[disp].xres;
-            ALOGD("%s disp = %d, width = %d",__FUNCTION__, disp,
-                    ctx->dpyAttr[disp].xres);
             break;
         case HWC_DISPLAY_HEIGHT:
             values[i] = ctx->dpyAttr[disp].yres;
-            ALOGD("%s disp = %d, height = %d",__FUNCTION__, disp,
-                    ctx->dpyAttr[disp].yres);
             break;
         case HWC_DISPLAY_DPI_X:
             values[i] = (int32_t) (ctx->dpyAttr[disp].xdpi*1000.0);
@@ -660,9 +650,12 @@ int hwc_getDisplayAttributes(struct hwc_composer_device_1* dev, int disp,
                     attributes[i]);
             return -EINVAL;
         }
+
+        i++;
     }
     return 0;
 }
+
 
 void hwc_dump(struct hwc_composer_device_1* dev, char *buff, int buff_len)
 {

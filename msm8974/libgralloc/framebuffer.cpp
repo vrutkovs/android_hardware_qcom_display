@@ -69,8 +69,10 @@ static int fb_setSwapInterval(struct framebuffer_device_t* dev,
     char pval[PROPERTY_VALUE_MAX];
     property_get("debug.egl.swapinterval", pval, "-1");
     int property_interval = atoi(pval);
-    if (property_interval >= 0)
+    if (property_interval >= 0) {
+        ALOGW("fb swapinterval overriden by debug.egl.swapinterval (value=%d",property_interval);
         interval = property_interval;
+    }
 
     fb_context_t* ctx = (fb_context_t*)dev;
     private_module_t* m = reinterpret_cast<private_module_t*>(
@@ -91,6 +93,7 @@ static int fb_post(struct framebuffer_device_t* dev, buffer_handle_t buffer)
     const size_t offset = hnd->base - m->framebuffer->base;
     m->info.activate = FB_ACTIVATE_VBL;
     m->info.yoffset = offset / m->finfo.line_length;
+    m->commit.wait_for_finish = m->swapInterval;
     if (ioctl(m->framebuffer->fd, FBIOPUT_VSCREENINFO, &m->info) == -1) {
         ALOGE("%s: FBIOPUT_VSCREENINFO for primary failed, str: %s",
                 __FUNCTION__, strerror(errno));
